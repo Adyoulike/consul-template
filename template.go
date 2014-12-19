@@ -186,7 +186,7 @@ func (t *Template) init() error {
 
 		// Helper functions
 		"byTag":           t.noop,
-		"env":             t.noop,
+		"env":             t.env,
 		"parseJSON":       t.noop,
 		"regexReplaceAll": t.noop,
 		"replaceAll":      t.noop,
@@ -335,6 +335,10 @@ func (t *Template) validateDependencies(c *TemplateContext) error {
 // dependency accumulation to allow the template to be processed once.
 func (t *Template) noop(thing ...interface{}) (interface{}, error) {
 	return thing[len(thing)-1], nil
+}
+
+func (c *Template) env(s string) (string, error) {
+	return os.Getenv(s), nil
 }
 
 // TemplateContext is what Template uses to determine the values that are
