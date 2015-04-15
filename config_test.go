@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul-template/test"
-	"github.com/hashicorp/consul-template/util"
+	"github.com/hashicorp/consul-template/watch"
 )
 
 // Test that an empty config does nothing
@@ -57,12 +57,138 @@ func TestMerge_complexConfig(t *testing.T) {
 		},
 	}
 
-	config := &Config{ConfigTemplates: templates[:2]}
-	otherConfig := &Config{ConfigTemplates: templates[2:]}
+	config := &Config{
+		ConfigTemplates: templates[:2],
+		Retry:           5 * time.Second,
+		Token:           "abc123",
+		MaxStale:        3 * time.Second,
+		Wait:            &watch.Wait{Min: 5 * time.Second, Max: 10 * time.Second},
+		LogLevel:        "WARN",
+	}
+	otherConfig := &Config{
+		ConfigTemplates: templates[2:],
+		Retry:           15 * time.Second,
+		Token:           "def456",
+		Wait:            &watch.Wait{Min: 25 * time.Second, Max: 50 * time.Second},
+		LogLevel:        "ERR",
+	}
+
 	config.Merge(otherConfig)
 
-	if !reflect.DeepEqual(config.ConfigTemplates, templates) {
-		t.Fatalf("expected %q to equal %q", config.ConfigTemplates, templates)
+	expected := &Config{
+		ConfigTemplates: templates,
+		Retry:           15 * time.Second,
+		Token:           "def456",
+		MaxStale:        3 * time.Second,
+		Wait:            &watch.Wait{Min: 25 * time.Second, Max: 50 * time.Second},
+		LogLevel:        "ERR",
+	}
+
+	if !reflect.DeepEqual(config, expected) {
+		t.Fatalf("expected %#v to equal %#v", config, expected)
+	}
+}
+
+// Test that the flags for HTTPS are properly merged
+func TestMerge_HttpsOptions(t *testing.T) {
+	config := &Config{
+		SSL: &SSL{
+			Enabled: false,
+			Verify:  false,
+		},
+	}
+	otherConfig := &Config{
+		SSL: &SSL{
+			Enabled: true,
+			Verify:  true,
+		},
+	}
+	config.Merge(otherConfig)
+
+	if config.SSL.Enabled != true {
+		t.Errorf("expected enabled to be true")
+	}
+
+	if config.SSL.Verify != true {
+		t.Errorf("expected SSL verify to be true")
+	}
+
+	config = &Config{
+		SSL: &SSL{
+			Enabled: true,
+			Verify:  true,
+		},
+	}
+	otherConfig = &Config{
+		SSL: &SSL{
+			Enabled: false,
+			Verify:  false,
+		},
+	}
+	config.Merge(otherConfig)
+
+	if config.SSL.Enabled != false {
+		t.Errorf("expected enabled to be false")
+	}
+
+	if config.SSL.Verify != false {
+		t.Errorf("expected SSL verify to be false")
+	}
+}
+
+func TestMerge_AuthOptions(t *testing.T) {
+	config := &Config{
+		Auth: &Auth{Username: "user", Password: "pass"},
+	}
+	otherConfig := &Config{
+		Auth: &Auth{Username: "newUser", Password: ""},
+	}
+	config.Merge(otherConfig)
+
+	if config.Auth.Username != "newUser" {
+		t.Errorf("expected %q to be %q", config.Auth.Username, "newUser")
+	}
+}
+
+func TestMerge_SyslogOptions(t *testing.T) {
+	config := &Config{
+		Syslog: &Syslog{Enabled: false, Facility: "LOCAL0"},
+	}
+	otherConfig := &Config{
+		Syslog: &Syslog{Enabled: true, Facility: "LOCAL1"},
+	}
+	config.Merge(otherConfig)
+
+	if config.Syslog.Enabled != true {
+		t.Errorf("expected %t to be %t", config.Syslog.Enabled, true)
+	}
+
+	if config.Syslog.Facility != "LOCAL1" {
+		t.Errorf("expected %q to be %q", config.Syslog.Facility, "LOCAL1")
+	}
+}
+
+func TestAuthString_disabled(t *testing.T) {
+	a := &Auth{Enabled: false}
+	expected := ""
+	if a.String() != expected {
+		t.Errorf("expected %q to be %q", a.String(), expected)
+	}
+}
+
+func TestAuthString_enabledNoPassword(t *testing.T) {
+	a := &Auth{Enabled: true, Username: "username"}
+	expected := "username"
+	if a.String() != expected {
+		t.Errorf("expected %q to be %q", a.String(), expected)
+	}
+}
+
+func TestAuthString_enabled(t *testing.T) {
+	a := &Auth{Enabled: true, Username: "username", Password: "password"}
+	expected := "username:password"
+	if a.String() != expected {
+		t.Errorf("expected %q to be %q", a.String(), expected)
 	}
 }
 
@@ -115,12 +241,50 @@ func TestParseConfig_mapstructureError(t *testing.T) {
 	}
 }
 
+// Test that mapstructure errors on extra kes
+func TestParseConfig_extraKeys(t *testing.T) {
+	configFile := test.CreateTempfile([]byte(`
+		fake_key = "nope"
+		another_fake_key = "never"
+	`), t)
+	defer test.DeleteTempfile(configFile, t)
+
+	_, err := ParseConfig(configFile.Name())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	expected := "invalid keys: another_fake_key, fake_key"
+	if !strings.Contains(err.Error(), expected) {
+		t.Errorf("expected %q to be %q", err.Error(), expected)
+	}
+}
+
 // Test that the config is parsed correctly
 func TestParseConfig_correctValues(t *testing.T) {
 	configFile := test.CreateTempfile([]byte(`
     consul = "nyc1.demo.consul.io"
+    max_stale = "5s"
     token = "abcd1234"
     wait = "5s:10s"
+    retry = "10s"
+    log_level = "warn"
+
+    auth {
+    	enabled = true
+    	username = "test"
+    	password = "test"
+    }
+
+    ssl {
+    	enabled = true
+    	verify = false
+    }
+
+    syslog {
+    	enabled = true
+    	facility = "LOCAL5"
+    }
 
     template {
       source = "nginx.conf.ctmpl"
@@ -141,14 +305,51 @@ func TestParseConfig_correctValues(t *testing.T) {
 	}
 
 	expected := &Config{
-		Path:   configFile.Name(),
-		Consul: "nyc1.demo.consul.io",
-		Token:  "abcd1234",
-		Wait: &util.Wait{
+		Path:        configFile.Name(),
+		Consul:      "nyc1.demo.consul.io",
+		MaxStale:    time.Second * 5,
+		MaxStaleRaw: "5s",
+		Auth: &Auth{
+			Enabled:  true,
+			Username: "test",
+			Password: "test",
+		},
+		AuthRaw: []*Auth{
+			&Auth{
+				Enabled:  true,
+				Username: "test",
+				Password: "test",
+			},
+		},
+		SSL: &SSL{
+			Enabled: true,
+			Verify:  false,
+		},
+		SSLRaw: []*SSL{
+			&SSL{
+				Enabled: true,
+				Verify:  false,
+			},
+		},
+		Syslog: &Syslog{
+			Enabled:  true,
+			Facility: "LOCAL5",
+		},
+		SyslogRaw: []*Syslog{
+			&Syslog{
+				Enabled:  true,
+				Facility: "LOCAL5",
+			},
+		},
+		Token: "abcd1234",
+		Wait: &watch.Wait{
 			Min: time.Second * 5,
 			Max: time.Second * 10,
 		},
-		WaitRaw: "5s:10s",
+		WaitRaw:  "5s:10s",
+		Retry:    10 * time.Second,
+		RetryRaw: "10s",
+		LogLevel: "warn",
 		ConfigTemplates: []*ConfigTemplate{
 			&ConfigTemplate{
 				Source:      "nginx.conf.ctmpl",
@@ -161,12 +362,29 @@ func TestParseConfig_correctValues(t *testing.T) {
 			},
 		},
 	}
+
 	if !reflect.DeepEqual(config, expected) {
-		t.Fatalf("expected %+v to be %+v", expected, config)
+		t.Fatalf("expected %#v to be %#v", config, expected)
 	}
 }
 
-// Test that ParseWait errors are propagated up
+func TestParseConfig_parseRetryError(t *testing.T) {
+	configFile := test.CreateTempfile([]byte(`
+    retry = "bacon pants"
+  `), t)
+	defer test.DeleteTempfile(configFile, t)
+
+	_, err := ParseConfig(configFile.Name())
+	if err == nil {
+		t.Fatal("expected error, but nothing was returned")
+	}
+
+	expectedErr := "retry invalid"
+	if !strings.Contains(err.Error(), expectedErr) {
+		t.Fatalf("expected error %q to contain %q", err.Error(), expectedErr)
+	}
+}
+
 func TestParseConfig_parseWaitError(t *testing.T) {
 	configFile := test.CreateTempfile([]byte(`
     wait = "not_valid:duration"
@@ -178,7 +396,7 @@ func TestParseConfig_parseWaitError(t *testing.T) {
 		t.Fatal("expected error, but nothing was returned")
 	}
 
-	expectedErr := "invalid duration not_valid"
+	expectedErr := "wait invalid"
 	if !strings.Contains(err.Error(), expectedErr) {
 		t.Fatalf("expected error %q to contain %q", err.Error(), expectedErr)
 	}

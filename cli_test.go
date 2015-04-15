@@ -4,19 +4,360 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/consul-template/test"
+	"github.com/hashicorp/consul-template/watch"
 )
+
+func TestParseFlags_consul(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-consul", "12.34.56.78",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "12.34.56.78"
+	if config.Consul != expected {
+		t.Errorf("expected %q to be %q", config.Consul, expected)
+	}
+}
+
+func TestParseFlags_token(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-token", "abcd1234",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "abcd1234"
+	if config.Token != expected {
+		t.Errorf("expected %q to be %q", config.Token, expected)
+	}
+}
+
+func TestParseFlags_authUsername(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-auth", "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if config.Auth.Enabled != true {
+		t.Errorf("expected auth to be enabled")
+	}
+
+	expected := "test"
+	if config.Auth.Username != expected {
+		t.Errorf("expected %v to be %v", config.Auth.Username, expected)
+	}
+}
+
+func TestParseFlags_authUsernamePassword(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-auth", "test:test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if config.Auth.Enabled != true {
+		t.Errorf("expected auth to be enabled")
+	}
+
+	expected := "test"
+	if config.Auth.Username != expected {
+		t.Errorf("expected %v to be %v", config.Auth.Username, expected)
+	}
+	if config.Auth.Password != expected {
+		t.Errorf("expected %v to be %v", config.Auth.Password, expected)
+	}
+}
+
+func TestParseFlags_SSL(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-ssl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := true
+	if config.SSL.Enabled != expected {
+		t.Errorf("expected %v to be %v", config.SSL.Enabled, expected)
+	}
+}
+
+func TestParseFlags_noSSL(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-ssl=false",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := false
+	if config.SSL.Enabled != expected {
+		t.Errorf("expected %v to be %v", config.SSL.Enabled, expected)
+	}
+}
+
+func TestParseFlags_SSLVerify(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-ssl-verify",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := true
+	if config.SSL.Verify != expected {
+		t.Errorf("expected %v to be %v", config.SSL.Verify, expected)
+	}
+}
+
+func TestParseFlags_noSSLVerify(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-ssl-verify=false",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := false
+	if config.SSL.Verify != expected {
+		t.Errorf("expected %v to be %v", config.SSL.Verify, expected)
+	}
+}
+
+func TestParseFlags_maxStale(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-max-stale", "10h",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := 10 * time.Hour
+	if config.MaxStale != expected {
+		t.Errorf("expected %q to be %q", config.MaxStale, expected)
+	}
+}
+
+func TestParseFlags_configTemplates(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-template", "in.ctmpl:out.txt:some command",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(config.ConfigTemplates) != 1 {
+		t.Fatal("expected 1 config template")
+	}
+
+	expected := &ConfigTemplate{
+		Source:      "in.ctmpl",
+		Destination: "out.txt",
+		Command:     "some command",
+	}
+	if !reflect.DeepEqual(config.ConfigTemplates[0], expected) {
+		t.Errorf("expected %q to be %q", config.ConfigTemplates[0], expected)
+	}
+}
+
+func TestParseFlags_syslog(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-syslog",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := true
+	if config.Syslog.Enabled != expected {
+		t.Errorf("expected %v to be %v", config.Syslog.Enabled, expected)
+	}
+}
+
+func TestParseFlags_syslogFacility(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-syslog-facility", "LOCAL5",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "LOCAL5"
+	if config.Syslog.Facility != expected {
+		t.Errorf("expected %v to be %v", config.Syslog.Facility, expected)
+	}
+}
+
+func TestParseFlags_wait(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-wait", "10h:11h",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := &watch.Wait{
+		Min: 10 * time.Hour,
+		Max: 11 * time.Hour,
+	}
+	if !reflect.DeepEqual(config.Wait, expected) {
+		t.Errorf("expected %v to be %v", config.Wait, expected)
+	}
+}
+
+func TestParseFlags_waitError(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	_, _, _, _, err := cli.parseFlags([]string{
+		"-wait", "watermelon:bacon",
+	})
+	if err == nil {
+		t.Fatal("expected error, but nothing was returned")
+	}
+
+	expected := "invalid value"
+	if !strings.Contains(err.Error(), expected) {
+		t.Errorf("expected %q to contain %q", err.Error(), expected)
+	}
+}
+
+func TestParseFlags_config(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-config", "/path/to/file",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "/path/to/file"
+	if config.Path != expected {
+		t.Errorf("expected %v to be %v", config.Path, expected)
+	}
+}
+
+func TestParseFlags_retry(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-retry", "10h",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := 10 * time.Hour
+	if config.Retry != expected {
+		t.Errorf("expected %v to be %v", config.Retry, expected)
+	}
+}
+
+func TestParseFlags_once(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	_, once, _, _, err := cli.parseFlags([]string{
+		"-once",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if once != true {
+		t.Errorf("expected once to be true")
+	}
+}
+
+func TestParseFlags_dry(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	_, _, dry, _, err := cli.parseFlags([]string{
+		"-dry",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if dry != true {
+		t.Errorf("expected dry to be true")
+	}
+}
+
+func TestParseFlags_version(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	_, _, _, version, err := cli.parseFlags([]string{
+		"-version",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if version != true {
+		t.Errorf("expected version to be true")
+	}
+}
+
+func TestParseFlags_logLevel(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	config, _, _, _, err := cli.parseFlags([]string{
+		"-log-level", "debug",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "debug"
+	if config.LogLevel != expected {
+		t.Errorf("expected %v to be %v", config.LogLevel, expected)
+	}
+}
+
+func TestParseFlags_errors(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	_, _, _, _, err := cli.parseFlags([]string{
+		"-totally", "-not", "-valid",
+	})
+
+	if err == nil {
+		t.Fatal("expected error, but nothing was returned")
+	}
+}
+
+func TestParseFlags_badArgs(t *testing.T) {
+	cli := NewCLI(ioutil.Discard, ioutil.Discard)
+	_, _, _, _, err := cli.parseFlags([]string{
+		"foo", "bar",
+	})
+
+	if err == nil {
+		t.Fatal("expected error, but nothing was returned")
+	}
+}
 
 func TestRun_printsErrors(t *testing.T) {
 	outStream, errStream := new(bytes.Buffer), new(bytes.Buffer)
-	cli := &CLI{outStream: outStream, errStream: errStream}
+	cli := NewCLI(outStream, errStream)
 	args := strings.Split("consul-template -bacon delicious", " ")
 
 	status := cli.Run(args)
@@ -32,7 +373,7 @@ func TestRun_printsErrors(t *testing.T) {
 
 func TestRun_versionFlag(t *testing.T) {
 	outStream, errStream := new(bytes.Buffer), new(bytes.Buffer)
-	cli := &CLI{outStream: outStream, errStream: errStream}
+	cli := NewCLI(outStream, errStream)
 	args := strings.Split("consul-template -version", " ")
 
 	status := cli.Run(args)
@@ -48,7 +389,7 @@ func TestRun_versionFlag(t *testing.T) {
 
 func TestRun_parseError(t *testing.T) {
 	outStream, errStream := new(bytes.Buffer), new(bytes.Buffer)
-	cli := &CLI{outStream: outStream, errStream: errStream}
+	cli := NewCLI(outStream, errStream)
 	args := strings.Split("consul-template -bacon delicious", " ")
 
 	status := cli.Run(args)
@@ -57,22 +398,6 @@ func TestRun_parseError(t *testing.T) {
 	}
 
 	expected := "flag provided but not defined: -bacon"
-	if !strings.Contains(errStream.String(), expected) {
-		t.Fatalf("expected %q to contain %q", errStream.String(), expected)
-	}
-}
-
-func TestRun_waitFlagError(t *testing.T) {
-	outStream, errStream := new(bytes.Buffer), new(bytes.Buffer)
-	cli := &CLI{outStream: outStream, errStream: errStream}
-	args := strings.Split("consul-template -wait=watermelon:bacon", " ")
-
-	status := cli.Run(args)
-	if status != ExitCodeParseWaitError {
-		t.Errorf("expected %q to eq %q", status, ExitCodeParseWaitError)
-	}
-
-	expected := "time: invalid duration watermelon"
 	if !strings.Contains(errStream.String(), expected) {
 		t.Fatalf("expected %q to contain %q", errStream.String(), expected)
 	}
@@ -88,13 +413,12 @@ func TestRun_onceFlag(t *testing.T) {
 	defer test.DeleteTempfile(out, t)
 
 	outStream, errStream := new(bytes.Buffer), new(bytes.Buffer)
-	cli := &CLI{outStream: outStream, errStream: errStream}
+	cli := NewCLI(outStream, errStream)
 
 	command := fmt.Sprintf("consul-template -consul demo.consul.io -template %s:%s -once", template.Name(), out.Name())
 	args := strings.Split(command, " ")
 
 	ch := make(chan int, 1)
-
 	go func() {
 		ch <- cli.Run(args)
 	}()
@@ -105,13 +429,9 @@ func TestRun_onceFlag(t *testing.T) {
 			t.Errorf("expected %d to eq %d", status, ExitCodeOK)
 			t.Errorf("stderr: %s", errStream.String())
 		}
-	case <-time.After(5 * time.Second):
-		t.Errorf("expected data, but nothing was returned")
+	case <-time.After(2 * time.Second):
+		t.Errorf("expected exit, did not exit after 2 seconds")
 	}
-}
-
-func TestQuiescence(t *testing.T) {
-	t.Skip("TODO")
 }
 
 func TestReload_sighup(t *testing.T) {
@@ -122,174 +442,24 @@ func TestReload_sighup(t *testing.T) {
 	defer test.DeleteTempfile(out, t)
 
 	outStream, errStream := new(bytes.Buffer), new(bytes.Buffer)
-	cli := &CLI{outStream: outStream, errStream: errStream}
+	cli := NewCLI(outStream, errStream)
 
 	command := fmt.Sprintf("consul-template -template %s:%s", template.Name(), out.Name())
 	args := strings.Split(command, " ")
 
-	go cli.Run(args)
-	defer cli.shutdown()
+	go func(args []string) {
+		if exit := cli.Run(args); exit != 0 {
+			t.Fatalf("bad exit code: %d", exit)
+		}
+	}(args)
+	defer cli.stop()
 
-	// Sleep to let the Runner run
-	time.Sleep(100 * time.Millisecond)
+	// Ensure we have run at least once
+	test.WaitForFileContents(out.Name(), []byte("initial value"), t)
 
 	newValue := []byte("new value")
 	ioutil.WriteFile(template.Name(), newValue, 0644)
 	syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
 
-	// Sleep to give the file time to write
-	time.Sleep(100 * time.Millisecond)
-
-	contents, err := ioutil.ReadFile(out.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !bytes.Equal(contents, newValue) {
-		t.Errorf("expected %q to contain %q", contents, newValue)
-	}
-}
-
-func TestBuildConfig_singleFile(t *testing.T) {
-	configFile := test.CreateTempfile([]byte(`
-		consul = "127.0.0.1"
-	`), t)
-	defer test.DeleteTempfile(configFile, t)
-
-	config := new(Config)
-	if err := buildConfig(config, configFile.Name()); err != nil {
-		t.Fatal(err)
-	}
-
-	expected := "127.0.0.1"
-	if config.Consul != expected {
-		t.Errorf("expected %q to be %q", config.Consul, expected)
-	}
-}
-
-func TestBuildConfig_NonExistentDirectory(t *testing.T) {
-	// Create a directory and then delete it
-	configDir, err := ioutil.TempDir(os.TempDir(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(configDir); err != nil {
-		t.Fatal(err)
-	}
-
-	config := new(Config)
-	err = buildConfig(config, configDir)
-	if err == nil {
-		t.Fatalf("expected error, but nothing was returned")
-	}
-
-	expected := "missing file/folder"
-	if !strings.Contains(err.Error(), expected) {
-		t.Fatalf("expected %q to contain %q", err.Error(), expected)
-	}
-}
-
-func TestBuildConfig_EmptyDirectory(t *testing.T) {
-	// Create a directory with no files
-	configDir, err := ioutil.TempDir(os.TempDir(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(configDir)
-
-	config := new(Config)
-	err = buildConfig(config, configDir)
-	if err == nil {
-		t.Fatalf("expected error, but nothing was returned")
-	}
-
-	expected := "must contain at least one configuration file"
-	if !strings.Contains(err.Error(), expected) {
-		t.Fatalf("expected %q to contain %q", err.Error(), expected)
-	}
-}
-
-func TestBuildConfig_BadConfigs(t *testing.T) {
-	configFile := test.CreateTempfile([]byte(`
-		totally not a vaild config
-	`), t)
-	defer test.DeleteTempfile(configFile, t)
-
-	configDir := filepath.Dir(configFile.Name())
-
-	config := new(Config)
-	err := buildConfig(config, configDir)
-	if err == nil {
-		t.Fatalf("expected error, but nothing was returned")
-	}
-
-	expected := "1 error(s) occurred"
-	if !strings.Contains(err.Error(), expected) {
-		t.Fatalf("expected %q to contain %q", err.Error(), expected)
-	}
-}
-
-func TestBuildConfig_configDir(t *testing.T) {
-	configDir, err := ioutil.TempDir(os.TempDir(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	configFile1, err := ioutil.TempFile(configDir, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	config1 := []byte(`
-		consul = "127.0.0.1:8500"
-	`)
-	_, err = configFile1.Write(config1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configFile2, err := ioutil.TempFile(configDir, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	config2 := []byte(`
-		template {
-		  source = "/path/on/disk/to/template"
-		  destination = "/path/on/disk/where/template/will/render"
-		  command = "optional command to run when the template is updated"
-		}
-	`)
-	_, err = configFile2.Write(config2)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	config := new(Config)
-	if err := buildConfig(config, configDir); err != nil {
-		t.Fatal(err)
-	}
-
-	expectedConfig := Config{
-		Consul: "127.0.0.1:8500",
-		ConfigTemplates: []*ConfigTemplate{{
-			Source:      "/path/on/disk/to/template",
-			Destination: "/path/on/disk/where/template/will/render",
-			Command:     "optional command to run when the template is updated",
-		}},
-	}
-	if expectedConfig.Consul != config.Consul {
-		t.Fatalf("Config files failed to combine. Expected Consul to be %s but got %s", expectedConfig.Consul, config.Consul)
-	}
-	if len(config.ConfigTemplates) != len(expectedConfig.ConfigTemplates) {
-		t.Fatalf("Expected %d ConfigTemplate but got %d", len(expectedConfig.ConfigTemplates), len(config.ConfigTemplates))
-	}
-	for i, expectTemplate := range expectedConfig.ConfigTemplates {
-		actualTemplate := config.ConfigTemplates[i]
-		if actualTemplate.Source != expectTemplate.Source {
-			t.Fatalf("Expected template Source to be %s but got %s", expectTemplate.Source, actualTemplate.Source)
-		}
-		if actualTemplate.Destination != expectTemplate.Destination {
-			t.Fatalf("Expected template Destination to be %s but got %s", expectTemplate.Destination, actualTemplate.Destination)
-		}
-		if actualTemplate.Command != expectTemplate.Command {
-			t.Fatalf("Expected template Command to be %s but got %s", expectTemplate.Command, actualTemplate.Command)
-		}
-	}
+	test.WaitForFileContents(out.Name(), []byte("new value"), t)
 }

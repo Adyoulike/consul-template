@@ -1,4 +1,4 @@
-package util
+package dependency
 
 import (
 	"reflect"
@@ -8,9 +8,9 @@ import (
 	"github.com/hashicorp/consul-template/test"
 )
 
-func TestKeyDependencyFetch(t *testing.T) {
+func TestStoreKeyFetch(t *testing.T) {
 	client, options := test.DemoConsulClient(t)
-	dep := &KeyDependency{
+	dep := &StoreKey{
 		rawKey: "global/time",
 		Path:   "global/time",
 	}
@@ -26,16 +26,16 @@ func TestKeyDependencyFetch(t *testing.T) {
 	}
 }
 
-func TestKeyDependencyHashCode_isUnique(t *testing.T) {
-	dep1 := &KeyDependency{rawKey: "config/redis/maxconns"}
-	dep2 := &KeyDependency{rawKey: "config/redis/minconns"}
+func TestStoreKeyHashCode_isUnique(t *testing.T) {
+	dep1 := &StoreKey{rawKey: "config/redis/maxconns"}
+	dep2 := &StoreKey{rawKey: "config/redis/minconns"}
 	if dep1.HashCode() == dep2.HashCode() {
 		t.Errorf("expected HashCode to be unique")
 	}
 }
 
-func TestParseKeyDependency_emptyString(t *testing.T) {
-	_, err := ParseKeyDependency("")
+func TestParseStoreKey_emptyString(t *testing.T) {
+	_, err := ParseStoreKey("")
 	if err == nil {
 		t.Fatal("expected error, but nothing was returned")
 	}
@@ -46,13 +46,13 @@ func TestParseKeyDependency_emptyString(t *testing.T) {
 	}
 }
 
-func TestParseKeyDependency_name(t *testing.T) {
-	sd, err := ParseKeyDependency("config/redis/maxconns")
+func TestParseStoreKey_name(t *testing.T) {
+	sd, err := ParseStoreKey("config/redis/maxconns")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected := &KeyDependency{
+	expected := &StoreKey{
 		rawKey: "config/redis/maxconns",
 		Path:   "config/redis/maxconns",
 	}
@@ -61,28 +61,29 @@ func TestParseKeyDependency_name(t *testing.T) {
 	}
 }
 
-func TestParseKeyDependency_nameColon(t *testing.T) {
-	sd, err := ParseKeyDependency("config/redis:magic:80/maxconns")
+func TestParseStoreKey_nameSpecialCharacters(t *testing.T) {
+	sd, err := ParseStoreKey("config/facet:größe-lf-si@nyc1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected := &KeyDependency{
-		rawKey: "config/redis:magic:80/maxconns",
-		Path:   "config/redis:magic:80/maxconns",
+	expected := &StoreKey{
+		rawKey:     "config/facet:größe-lf-si@nyc1",
+		Path:       "config/facet:größe-lf-si",
+		DataCenter: "nyc1",
 	}
 	if !reflect.DeepEqual(sd, expected) {
 		t.Errorf("expected %+v to equal %+v", sd, expected)
 	}
 }
 
-func TestParseKeyDependency_nameTagDataCenter(t *testing.T) {
-	sd, err := ParseKeyDependency("config/redis/maxconns@nyc1")
+func TestParseStoreKey_nameTagDataCenter(t *testing.T) {
+	sd, err := ParseStoreKey("config/redis/maxconns@nyc1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected := &KeyDependency{
+	expected := &StoreKey{
 		rawKey:     "config/redis/maxconns@nyc1",
 		Path:       "config/redis/maxconns",
 		DataCenter: "nyc1",

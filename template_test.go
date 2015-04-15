@@ -3,881 +3,561 @@ package main
 import (
 	"bytes"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	dep "github.com/hashicorp/consul-template/dependency"
 	"github.com/hashicorp/consul-template/test"
-	"github.com/hashicorp/consul-template/util"
 )
 
-func TestDependencies_empty(t *testing.T) {
-	inTemplate := test.CreateTempfile(nil, t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dependencies := template.Dependencies()
-
-	if num := len(dependencies); num != 0 {
-		t.Errorf("expected 0 Dependency, got: %d", num)
-	}
-}
-
-func TestDependencies_funcs(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range service "release.webapp" }}{{ end }}
-    {{ key "service/redis/maxconns" }}
-    {{ range keyPrefix "service/redis/config" }}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dependencies := template.Dependencies()
-
-	if num := len(dependencies); num != 3 {
-		t.Fatalf("expected 3 dependencies, got: %d", num)
-	}
-}
-
-func TestDependencies_funcsDuplicates(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range service "release.webapp" }}{{ end }}
-    {{ range service "release.webapp" }}{{ end }}
-    {{ range service "release.webapp" }}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dependencies := template.Dependencies()
-
-	if num := len(dependencies); num != 1 {
-		t.Fatalf("expected 1 Dependency, got: %d", num)
-	}
-
-	dependency, expected := dependencies[0], "release.webapp [passing]"
-	if dependency.Key() != expected {
-		t.Errorf("expected %q to equal %q", dependency.Key(), expected)
-	}
-}
-
-func TestDependencies_funcsError(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range service "totally&not&a&valid&service" }}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	_, err := NewTemplate(inTemplate.Name())
+func TestNewTemplate_missingPath(t *testing.T) {
+	_, err := NewTemplate("/path/to/non-existent/file")
 	if err == nil {
 		t.Fatal("expected error, but nothing was returned")
 	}
 
-	expected := "error calling service:"
+	expected := "no such file or directory"
 	if !strings.Contains(err.Error(), expected) {
-		t.Errorf("expected %q to contain %q", err.Error(), expected)
+		t.Errorf("expected %q to be %q", err.Error(), expected)
 	}
 }
 
-func TestExecute_noTemplateContext(t *testing.T) {
-	inTemplate := test.CreateTempfile(nil, t)
-	defer test.DeleteTempfile(inTemplate, t)
+func TestNewTemplate_setsPathAndContents(t *testing.T) {
+	contents := []byte("some content")
 
-	template, err := NewTemplate(inTemplate.Name())
+	in := test.CreateTempfile(contents, t)
+	defer test.DeleteTempfile(in, t)
+
+	tmpl, err := NewTemplate(in.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, executeErr := template.Execute(nil)
-	if executeErr == nil {
-		t.Fatal("expected error, but nothing was returned")
+	if tmpl.Path != in.Name() {
+		t.Errorf("expected %q to be %q", tmpl.Path, in.Name())
 	}
 
-	expected := "templateContext must be given"
-	if !strings.Contains(executeErr.Error(), expected) {
-		t.Errorf("expected %q to contain %q", executeErr.Error(), expected)
+	if tmpl.contents != string(contents) {
+		t.Errorf("expected %q to be %q", tmpl.contents, string(contents))
 	}
 }
 
-func TestExecute_dependenciesError(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range not_a_valid "template" }}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
+func TestExecute_noDependencies(t *testing.T) {
+	contents := []byte("This is a template with just text")
 
-	_, err := NewTemplate(inTemplate.Name())
+	in := test.CreateTempfile(contents, t)
+	defer test.DeleteTempfile(in, t)
+
+	tmpl, err := NewTemplate(in.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	brain := NewBrain()
+	used, missing, result, err := tmpl.Execute(brain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if num := len(used); num != 0 {
+		t.Errorf("expected 0 missing, got: %d", num)
+	}
+
+	if num := len(missing); num != 0 {
+		t.Errorf("expected 0 missing, got: %d", num)
+	}
+
+	if !bytes.Equal(result, contents) {
+		t.Errorf("expected %q to be %q", result, contents)
+	}
+}
+
+func TestExecute_missingDependencies(t *testing.T) {
+	contents := []byte(`{{key "foo"}}`)
+
+	in := test.CreateTempfile(contents, t)
+	defer test.DeleteTempfile(in, t)
+
+	tmpl, err := NewTemplate(in.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	brain := NewBrain()
+	used, missing, result, err := tmpl.Execute(brain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if num := len(used); num != 1 {
+		t.Fatalf("expected 1 used, got: %d", num)
+	}
+
+	if num := len(missing); num != 1 {
+		t.Fatalf("expected 1 missing, got: %d", num)
+	}
+
+	expected, err := dep.ParseStoreKey("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(missing[0], expected) {
+		t.Errorf("expected %q to be %q", missing[0], expected)
+	}
+
+	if num := len(used); num != 1 {
+		t.Fatalf("expected 1 used, got %d", num)
+	}
+
+	if !reflect.DeepEqual(used[0], expected) {
+		t.Errorf("expected %q to be %q", used[0], expected)
+	}
+
+	expectedResult := []byte("")
+	if !bytes.Equal(result, expectedResult) {
+		t.Errorf("expected %q to be %q", result, expectedResult)
+	}
+}
+
+func TestExecte_badFuncs(t *testing.T) {
+	in := test.CreateTempfile([]byte(`{{ tickle_me_pink }}`), t)
+	defer test.DeleteTempfile(in, t)
+
+	tmpl, err := NewTemplate(in.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	brain := NewBrain()
+	used, missing, result, err := tmpl.Execute(brain)
 	if err == nil {
 		t.Fatal("expected error, but nothing was returned")
 	}
 
-	expected := `template: out:2: function "not_a_valid" not defined`
+	expected := `function "tickle_me_pink" not defined`
 	if !strings.Contains(err.Error(), expected) {
 		t.Errorf("expected %q to contain %q", err.Error(), expected)
 	}
-}
 
-func TestExecute_missingService(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range service "release.webapp" }}{{ end }}
-    {{ range service "production.webapp" }}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
+	if used != nil {
+		t.Errorf("expected used to be nil")
 	}
 
-	context := &TemplateContext{
-		Services: map[string][]*util.Service{
-			"release.webapp [passing]": []*util.Service{},
-		},
+	if missing != nil {
+		t.Errorf("expected missing to be nil")
 	}
 
-	_, executeErr := template.Execute(context)
-	if executeErr == nil {
-		t.Fatal("expected error, but nothing was returned")
-	}
-
-	expected := "templateContext missing service `production.webapp [passing]'"
-	if !strings.Contains(executeErr.Error(), expected) {
-		t.Errorf("expected %q to contain %q", executeErr.Error(), expected)
+	if result != nil {
+		t.Errorf("expected result to be nil")
 	}
 }
 
-func TestExecute_missingKey(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
+func TestExecute_funcs(t *testing.T) {
+	in := test.CreateTempfile([]byte(`
+    {{ range service "release.webapp" }}{{.Address}}{{ end }}
     {{ key "service/redis/maxconns" }}
-    {{ key "service/redis/online" }}
+    {{ range ls "service/redis/config" }}{{.Key}}{{ end }}
   `), t)
-	defer test.DeleteTempfile(inTemplate, t)
+	defer test.DeleteTempfile(in, t)
 
-	template, err := NewTemplate(inTemplate.Name())
+	tmpl, err := NewTemplate(in.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	context := &TemplateContext{
-		Keys: map[string]string{
-			"service/redis/maxconns": "3",
-		},
+	brain := NewBrain()
+	used, missing, _, err := tmpl.Execute(brain)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	_, executeErr := template.Execute(context)
-	if executeErr == nil {
-		t.Fatal("expected error, but nothing was returned")
+	if num := len(missing); num != 3 {
+		t.Fatalf("expected 3 missing, got: %d", num)
 	}
 
-	expected := "templateContext missing key `service/redis/online'"
-	if !strings.Contains(executeErr.Error(), expected) {
-		t.Errorf("expected %q to contain %q", executeErr.Error(), expected)
+	if num := len(used); num != 3 {
+		t.Fatalf("expected 3 used, got: %d", num)
 	}
 }
 
-func TestExecute_missingKeyPrefix(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range keyPrefix "service/redis/config" }}{{ end }}
-    {{ range keyPrefix "service/nginx/config" }}{{ end }}
+func TestExecute_duplicateFuncs(t *testing.T) {
+	in := test.CreateTempfile([]byte(`
+    {{ key "service/redis/maxconns" }}
+    {{ key "service/redis/maxconns" }}
+    {{ key "service/redis/maxconns" }}
   `), t)
-	defer test.DeleteTempfile(inTemplate, t)
+	defer test.DeleteTempfile(in, t)
 
-	template, err := NewTemplate(inTemplate.Name())
+	tmpl, err := NewTemplate(in.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	context := &TemplateContext{
-		KeyPrefixes: map[string][]*util.KeyPair{
-			"service/redis/config": []*util.KeyPair{},
-		},
+	brain := NewBrain()
+	used, missing, _, err := tmpl.Execute(brain)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	_, executeErr := template.Execute(context)
-	if executeErr == nil {
-		t.Fatal("expected error, but nothing was returned")
+	if num := len(missing); num != 1 {
+		t.Fatalf("expected 1 missing, got: %d", num)
 	}
 
-	expected := "templateContext missing keyPrefix `service/nginx/config'"
-	if !strings.Contains(executeErr.Error(), expected) {
-		t.Errorf("expected %q to contain %q", executeErr.Error(), expected)
+	if num := len(used); num != 1 {
+		t.Fatalf("expected 1 used, got: %d", num)
 	}
 }
 
-func TestExecute_missingNode(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range nodes }}{{ end }}
-    {{ range nodes "@nyc1" }}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
+func TestExecute_renders(t *testing.T) {
+	// Stub out the time.
+	now = func() time.Time { return time.Unix(0, 0).UTC() }
 
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
+	in := test.CreateTempfile([]byte(`
+		API Functions
+		-------------
+		datacenters:{{ range datacenters }}
+			{{.}}{{ end }}
+		file: {{ file "/path/to/file" }}
+		key: {{ key "config/redis/maxconns" }}
+		ls:{{ range ls "config/redis" }}
+			{{.Key}}={{.Value}}{{ end }}
+		nodes:{{ range nodes }}
+			{{.Node}}{{ end }}
+		service:{{ range service "webapp" }}
+			{{.Address}}{{ end }}
+		service (any):{{ range service "webapp" "any" }}
+			{{.Address}}{{ end }}
+		service (tag.Contains):{{ range service "webapp" }}{{ if .Tags.Contains "production" }}
+			{{.Node}}{{ end }}{{ end }}
+		services:{{ range services }}
+			{{.Name}}{{ end }}
+		tree:{{ range tree "config/redis" }}
+			{{.Key}}={{.Value}}{{ end }}
 
-	context := &TemplateContext{
-		Nodes: map[string][]*util.Node{
-			"": []*util.Node{},
-		},
-	}
-
-	_, executeErr := template.Execute(context)
-	if executeErr == nil {
-		t.Fatal("expected error, but nothing was returned")
-	}
-
-	expected := "templateContext missing nodes `@nyc1'"
-	if !strings.Contains(executeErr.Error(), expected) {
-		t.Errorf("expected %q to contain %q", executeErr.Error(), expected)
-	}
-}
-
-func TestExecute_rendersServices(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range service "release.webapp" }}
-    server {{.Name}} {{.Address}}:{{.Port}}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	serviceWeb1 := &util.Service{
-		Node:    "nyc-worker-1",
-		Address: "123.123.123.123",
-		ID:      "web1",
-		Name:    "web1",
-		Port:    1234,
-	}
-
-	serviceWeb2 := &util.Service{
-		Node:    "nyc-worker-2",
-		Address: "456.456.456.456",
-		ID:      "web2",
-		Name:    "web2",
-		Port:    5678,
-	}
-
-	context := &TemplateContext{
-		Services: map[string][]*util.Service{
-			"release.webapp [passing]": []*util.Service{serviceWeb1, serviceWeb2},
-		},
-	}
-
-	contents, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := bytes.TrimSpace([]byte(`
-    server web1 123.123.123.123:1234
-    server web2 456.456.456.456:5678
-  `))
-
-	if !bytes.Equal(bytes.TrimSpace(contents), expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", bytes.TrimSpace(contents), expected)
-	}
-}
-
-func TestExecute_rendersServicesWithHealthCheckArgument(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-		{{ range service "release.webapp" "any" }}
-		server {{.Name}} {{.Address}}:{{.Port}}{{ end }}
+		Helper Functions
+		----------------
+		byKey:{{ range $key, $pairs := tree "config/redis" | byKey }}
+			{{$key}}:{{ range $pairs }}
+				{{.Key}}={{.Value}}{{ end }}{{ end }}
+		byTag (health service):{{ range $tag, $services := service "webapp" | byTag }}
+			{{$tag}}:{{ range $services }}
+				{{.Address}}{{ end }}{{ end }}
+		byTag (catalog services):{{ range $tag, $services := services | byTag }}
+			{{$tag}}:{{ range $services }}
+				{{.Name}}{{ end }}{{ end }}
+		env: {{ env "foo" }}
+		loop:{{range loop 3}}
+			test{{end}}
+		loop(i):{{range $i := loop 5 8}}
+			test{{$i}}{{end}}
+		parseJSON (string):{{ range $key, $value := "{\"foo\": \"bar\"}" | parseJSON }}
+			{{$key}}={{$value}}{{ end }}
+		parseJSON (file):{{ range $key, $value := file "/path/to/json/file" | parseJSON }}
+			{{$key}}={{$value}}{{ end }}
+		parseJSON (env):{{ range $key, $value := env "json" | parseJSON }}
+			{{$key}}={{$value}}{{ end }}
+		timestamp: {{ timestamp }}
+		timestamp (formatted): {{ timestamp "2006-01-02" }}
+		regexMatch: {{ file "/path/to/file"  | regexMatch ".*[cont][a-z]+" }}
+		regexMatch: {{ file "/path/to/file"  | regexMatch "v[0-9]*" }}
+		regexReplaceAll: {{ file "/path/to/file" | regexReplaceAll "\\w" "x" }}
+		replaceAll: {{ file "/path/to/file" | replaceAll "some" "this" }}
+		toLower: {{ file "/path/to/file" | toLower }}
+		toTitle: {{ file "/path/to/file" | toTitle }}
+		toUpper: {{ file "/path/to/file" | toUpper }}
 	`), t)
-	defer test.DeleteTempfile(inTemplate, t)
+	defer test.DeleteTempfile(in, t)
 
-	template, err := NewTemplate(inTemplate.Name())
+	tmpl, err := NewTemplate(in.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	serviceWeb1 := &util.Service{
-		Node:    "nyc-worker-1",
-		Address: "123.123.123.123",
-		ID:      "web1",
-		Name:    "web1",
-		Port:    1234,
-	}
+	brain := NewBrain()
 
-	serviceWeb2 := &util.Service{
-		Node:    "nyc-worker-2",
-		Address: "456.456.456.456",
-		ID:      "web2",
-		Name:    "web2",
-		Port:    5678,
-	}
+	var d dep.Dependency
 
-	context := &TemplateContext{
-		Services: map[string][]*util.Service{
-			"release.webapp [any]": []*util.Service{serviceWeb1, serviceWeb2},
+	d, err = dep.ParseDatacenters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, []string{"dc1", "dc2"})
+
+	d, err = dep.ParseFile("/path/to/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, "some content")
+
+	d, err = dep.ParseStoreKey("config/redis/maxconns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, "5")
+
+	d, err = dep.ParseStoreKeyPrefix("config/redis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, []*dep.KeyPair{
+		&dep.KeyPair{Key: "", Value: ""},
+		&dep.KeyPair{Key: "admin/port", Value: "1134"},
+		&dep.KeyPair{Key: "maxconns", Value: "5"},
+		&dep.KeyPair{Key: "minconns", Value: "2"},
+	})
+
+	d, err = dep.ParseCatalogNodes("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, []*dep.Node{
+		&dep.Node{Node: "node1"},
+		&dep.Node{Node: "node2"},
+	})
+
+	d, err = dep.ParseHealthServices("webapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, []*dep.HealthService{
+		&dep.HealthService{
+			Node:    "node1",
+			Address: "1.2.3.4",
+			Tags:    []string{"release"},
 		},
-	}
-
-	contents, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := bytes.TrimSpace([]byte(`
-		server web1 123.123.123.123:1234
-		server web2 456.456.456.456:5678
-	`))
-
-	if !bytes.Equal(bytes.TrimSpace(contents), expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", bytes.TrimSpace(contents), expected)
-	}
-}
-
-func TestExecute_rendersKeys(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    minconns: {{ key "service/redis/minconns" }}
-    maxconns: {{ key "service/redis/maxconns" }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	context := &TemplateContext{
-		Keys: map[string]string{
-			"service/redis/minconns": "2",
-			"service/redis/maxconns": "11",
+		&dep.HealthService{
+			Node:    "node2",
+			Address: "5.6.7.8",
+			Tags:    []string{"release", "production"},
 		},
+		&dep.HealthService{
+			Node:    "node3",
+			Address: "9.10.11.12",
+			Tags:    []string{"production"},
+		},
+	})
+
+	d, err = dep.ParseHealthServices("webapp", "any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, []*dep.HealthService{
+		&dep.HealthService{Node: "node1", Address: "1.2.3.4"},
+		&dep.HealthService{Node: "node2", Address: "5.6.7.8"},
+	})
+
+	d, err = dep.ParseCatalogServices("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, []*dep.CatalogService{
+		&dep.CatalogService{
+			Name: "service1",
+			Tags: []string{"production"},
+		},
+		&dep.CatalogService{
+			Name: "service2",
+			Tags: []string{"release", "production"},
+		},
+	})
+
+	if err := os.Setenv("foo", "bar"); err != nil {
+		t.Fatal(err)
 	}
 
-	contents, err := template.Execute(context)
+	d, err = dep.ParseFile("/path/to/json/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain.Remember(d, `{"foo": "bar"}`)
+
+	if err := os.Setenv("json", `{"foo": "bar"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, result, err := tmpl.Execute(brain)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	expected := []byte(`
-    minconns: 2
-    maxconns: 11
-  `)
-	if !bytes.Equal(contents, expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", contents, expected)
-	}
-}
+		API Functions
+		-------------
+		datacenters:
+			dc1
+			dc2
+		file: some content
+		key: 5
+		ls:
+			maxconns=5
+			minconns=2
+		nodes:
+			node1
+			node2
+		service:
+			1.2.3.4
+			5.6.7.8
+			9.10.11.12
+		service (any):
+			1.2.3.4
+			5.6.7.8
+		service (tag.Contains):
+			node2
+			node3
+		services:
+			service1
+			service2
+		tree:
+			admin/port=1134
+			maxconns=5
+			minconns=2
 
-func TestExecute_rendersNodes(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range nodes }}
-    node {{.Node}} {{.Address}}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
+		Helper Functions
+		----------------
+		byKey:
+			admin:
+				port=1134
+		byTag (health service):
+			production:
+				5.6.7.8
+				9.10.11.12
+			release:
+				1.2.3.4
+				5.6.7.8
+		byTag (catalog services):
+			production:
+				service1
+				service2
+			release:
+				service2
+		env: bar
+		loop:
+			test
+			test
+			test
+		loop(i):
+			test5
+			test6
+			test7
+		parseJSON (string):
+			foo=bar
+		parseJSON (file):
+			foo=bar
+		parseJSON (env):
+			foo=bar
+		timestamp: 1970-01-01T00:00:00Z
+		timestamp (formatted): 1970-01-01
+		regexMatch: true
+		regexMatch: false
+		regexReplaceAll: xxxx xxxxxxx
+		replaceAll: this content
+		toLower: some content
+		toTitle: Some Content
+		toUpper: SOME CONTENT
+	`)
 
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	node1 := &util.Node{
-		Node:    "nyc-worker-1",
-		Address: "123.123.123.123",
-	}
-
-	node2 := &util.Node{
-		Node:    "nyc-worker-2",
-		Address: "456.456.456.456",
-	}
-
-	context := &TemplateContext{
-		Nodes: map[string][]*util.Node{
-			"": []*util.Node{node1, node2},
-		},
-	}
-
-	contents, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := bytes.TrimSpace([]byte(`
-    node nyc-worker-1 123.123.123.123
-    node nyc-worker-2 456.456.456.456
-  `))
-
-	if !bytes.Equal(bytes.TrimSpace(contents), expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", bytes.TrimSpace(contents), expected)
-	}
-}
-
-func TestExecute_rendersLs(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range ls "service/redis/config" }}
-    {{.Key}} = {{.Value}}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	minconnsConfig := &util.KeyPair{
-		Key:   "minconns",
-		Value: "2",
-	}
-
-	maxconnsConfig := &util.KeyPair{
-		Key:   "maxconns",
-		Value: "11",
-	}
-
-	emptyFolderConfig := &util.KeyPair{
-		Key:   "",
-		Value: "",
-	}
-
-	childConfig := &util.KeyPair{
-		Key:   "user/sethvargo",
-		Value: "true",
-	}
-
-	context := &TemplateContext{
-		KeyPrefixes: map[string][]*util.KeyPair{
-			"service/redis/config": []*util.KeyPair{
-				emptyFolderConfig,
-				minconnsConfig,
-				maxconnsConfig,
-				childConfig,
-			},
-		},
-	}
-
-	contents, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := bytes.TrimSpace([]byte(`
-    minconns = 2
-    maxconns = 11
-  `))
-	if !bytes.Equal(bytes.TrimSpace(contents), expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", bytes.TrimSpace(contents), expected)
-	}
-}
-
-func TestExecute_rendersTree(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-    {{ range tree "service/redis/config" }}
-    {{.Key}} {{.Value}}{{ end }}
-  `), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	minconnsConfig := &util.KeyPair{
-		Key:   "minconns",
-		Value: "2",
-	}
-
-	maxconnsConfig := &util.KeyPair{
-		Key:   "maxconns",
-		Value: "11",
-	}
-
-	childConfig := &util.KeyPair{
-		Key:   "user/sethvargo",
-		Value: "true",
-	}
-
-	emptyFolderConfig := &util.KeyPair{
-		Key:   "",
-		Value: "",
-	}
-
-	emptyChildFolderConfig := &util.KeyPair{
-		Key:   "user/",
-		Value: "",
-	}
-
-	context := &TemplateContext{
-		KeyPrefixes: map[string][]*util.KeyPair{
-			"service/redis/config": []*util.KeyPair{
-				minconnsConfig,
-				maxconnsConfig,
-				childConfig,
-				emptyFolderConfig,
-				emptyChildFolderConfig,
-			},
-		},
-	}
-
-	contents, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := bytes.TrimSpace([]byte(`
-    minconns 2
-    maxconns 11
-    user/sethvargo true
-  `))
-	if !bytes.Equal(bytes.TrimSpace(contents), expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", bytes.TrimSpace(contents), expected)
-	}
-}
-
-func TestHashCode_returnsValue(t *testing.T) {
-	template := &Template{Path: "/foo/bar/blitz.ctmpl"}
-
-	expected := "Template|/foo/bar/blitz.ctmpl"
-	if template.HashCode() != expected {
-		t.Errorf("expected %q to equal %q", template.HashCode(), expected)
-	}
-}
-
-func TestExecute_decodeJSON(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-		{{with $d := file "data.json" | parseJSON}}
-		{{$d.foo}}
-		{{end}}
-	`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	context := &TemplateContext{
-		File: map[string]string{
-			"data.json": `{"foo":"bar"}`,
-		},
-	}
-
-	data, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, expected := bytes.TrimSpace(data), []byte("bar")
 	if !bytes.Equal(result, expected) {
-		t.Errorf("expected %q to equal %q", result, expected)
+		t.Errorf("expected \n%s\n to be \n%s\n", result, expected)
 	}
 }
 
-func TestExecute_decodeJSONArray(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-		{{with $d := file "data.json" | parseJSON}}
-		{{range $i := $d}}{{$i}}{{end}}
-		{{end}}
+func TestExecute_multipass(t *testing.T) {
+	in := test.CreateTempfile([]byte(`
+		{{ range ls "services" }}{{.Key}}:{{ range service .Key }}
+			{{.Node}} {{.Address}}:{{.Port}}{{ end }}
+		{{ end }}
 	`), t)
-	defer test.DeleteTempfile(inTemplate, t)
+	defer test.DeleteTempfile(in, t)
 
-	template, err := NewTemplate(inTemplate.Name())
+	tmpl, err := NewTemplate(in.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	context := &TemplateContext{
-		File: map[string]string{
-			"data.json": `["1", "2", "3"]`,
-		},
-	}
-	data, err := template.Execute(context)
+	brain := NewBrain()
+
+	used, missing, result, err := tmpl.Execute(brain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, expected := bytes.TrimSpace(data), []byte("123")
+
+	if num := len(missing); num != 1 {
+		t.Errorf("expected 1 missing, got: %d", num)
+	}
+
+	if num := len(used); num != 1 {
+		t.Errorf("expected 1 used, got: %d", num)
+	}
+
+	expected := bytes.TrimSpace([]byte(""))
+	result = bytes.TrimSpace(result)
 	if !bytes.Equal(result, expected) {
-		t.Errorf("expected %q to equal %q", result, expected)
+		t.Errorf("expected %q to be %q", result, expected)
 	}
-}
 
-func TestExecute_decodeJSONDeep(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-		{{with $d := file "data.json" | parseJSON}}
-		{{$d.foo.bar.zip}}
-		{{end}}
-	`), t)
-	defer test.DeleteTempfile(inTemplate, t)
+	// Receive data for the key prefix dependency
+	d1, err := dep.ParseStoreKeyPrefix("services")
+	brain.Remember(d1, []*dep.KeyPair{
+		&dep.KeyPair{Key: "webapp", Value: "1"},
+		&dep.KeyPair{Key: "database", Value: "1"},
+	})
 
-	template, err := NewTemplate(inTemplate.Name())
+	used, missing, result, err = tmpl.Execute(brain)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	context := &TemplateContext{
-		File: map[string]string{
-			"data.json": `{
-				"foo": {
-					"bar": {
-						"zip": "zap"
-					}
-				}
-			}`,
-		},
+	if num := len(missing); num != 2 {
+		t.Errorf("expected 2 missing, got: %d", num)
 	}
 
-	data, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
+	if num := len(used); num != 3 {
+		t.Errorf("expected 3 used, got: %d", num)
 	}
 
-	result, expected := bytes.TrimSpace(data), []byte("zap")
-	if !bytes.Equal(result, expected) {
-		t.Errorf("expected %q to equal %q", result, expected)
-	}
-}
-
-func TestExecute_groupByTag(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-		{{range $t, $s := service "webapp" | byTag}}{{$t}}
-		{{range $s}}	server {{.Name}} {{.Address}}:{{.Port}}
-		{{end}}{{end}}
-	`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	serviceWeb1 := &util.Service{
-		Node:    "nyc-api-1",
-		Address: "127.0.0.1",
-		ID:      "web1",
-		Name:    "web1",
-		Port:    1234,
-		Tags:    []string{"auth", "search"},
-	}
-
-	serviceWeb2 := &util.Service{
-		Node:    "nyc-api-2",
-		Address: "127.0.0.2",
-		ID:      "web2",
-		Name:    "web2",
-		Port:    5678,
-		Tags:    []string{"search"},
-	}
-
-	serviceWeb3 := &util.Service{
-		Node:    "nyc-api-3",
-		Address: "127.0.0.3",
-		ID:      "web3",
-		Name:    "web3",
-		Port:    9012,
-		Tags:    []string{"metric"},
-	}
-
-	context := &TemplateContext{
-		Services: map[string][]*util.Service{
-			"webapp [passing]": []*util.Service{serviceWeb1, serviceWeb2, serviceWeb3},
-		},
-	}
-
-	contents, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := bytes.TrimSpace([]byte(`
-		auth
-			server web1 127.0.0.1:1234
-		metric
-			server web3 127.0.0.3:9012
-		search
-			server web1 127.0.0.1:1234
-			server web2 127.0.0.2:5678
+	expected = bytes.TrimSpace([]byte(`
+		webapp:
+		database:
 	`))
-
-	if !bytes.Equal(bytes.TrimSpace(contents), expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", bytes.TrimSpace(contents), expected)
+	result = bytes.TrimSpace(result)
+	if !bytes.Equal(result, expected) {
+		t.Errorf("expected \n%q\n to be \n%q\n", result, expected)
 	}
-}
 
-func TestExecute_serviceTagsContains(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`
-		{{range service "web" }}
-		{{.ID}}:
-			{{if .Tags.Contains "auth"}}a{{else}}-{{end}}
-			{{if .Tags.Contains "search"}}s{{else}}-{{end}}
-			{{if .Tags.Contains "other"}}o{{else}}-{{end}}{{end}}
-	`), t)
-	defer test.DeleteTempfile(inTemplate, t)
+	// Receive data for the services
+	d2, err := dep.ParseHealthServices("webapp")
+	brain.Remember(d2, []*dep.HealthService{
+		&dep.HealthService{Node: "web01", Address: "1.2.3.4", Port: 1234},
+	})
 
-	template, err := NewTemplate(inTemplate.Name())
+	d3, err := dep.ParseHealthServices("database")
+	brain.Remember(d3, []*dep.HealthService{
+		&dep.HealthService{Node: "db01", Address: "5.6.7.8", Port: 5678},
+	})
+
+	used, missing, result, err = tmpl.Execute(brain)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	service1 := &util.Service{
-		Node:    "nyc-api-1",
-		Address: "127.0.0.1",
-		ID:      "web1",
-		Name:    "web1",
-		Port:    1234,
-		Tags:    []string{"auth", "search"},
-	}
-	service2 := &util.Service{
-		Node:    "nyc-api-2",
-		Address: "127.0.0.2",
-		ID:      "web2",
-		Name:    "web2",
-		Port:    5678,
-		Tags:    []string{"auth"},
+	if num := len(missing); num != 0 {
+		t.Errorf("expected 0 missing, got: %d", num)
 	}
 
-	context := &TemplateContext{
-		Services: map[string][]*util.Service{
-			"web [passing]": []*util.Service{service1, service2},
-		},
+	if num := len(used); num != 3 {
+		t.Errorf("expected 3 used, got: %d", num)
 	}
 
-	contents, err := template.Execute(context)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := bytes.TrimSpace([]byte(`
-		web1:
-			a
-			s
-			-
-		web2:
-			a
-			-
-			-
+	expected = bytes.TrimSpace([]byte(`
+		webapp:
+			web01 1.2.3.4:1234
+		database:
+			db01 5.6.7.8:5678
 	`))
-
-	if !bytes.Equal(bytes.TrimSpace(contents), expected) {
-		t.Errorf("expected \n%q\n to equal \n%q\n", bytes.TrimSpace(contents), expected)
-	}
-}
-
-func TestExecute_env(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`{{env "CONSUL_TEMPLATE_TESTVAR"}}`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	os.Setenv("CONSUL_TEMPLATE_TESTVAR", "F0F0F0")
-	contents, err := template.Execute(&TemplateContext{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := []byte("F0F0F0")
-	if !bytes.Equal(contents, expected) {
-		t.Fatalf("expected %q to be %q", contents, expected)
-	}
-}
-
-func TestExecute_replaceAll(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`{{"random:name:532" | replaceAll ":" "_"}}`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	contents, err := template.Execute(&TemplateContext{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := []byte("random_name_532")
-	if !bytes.Equal(contents, expected) {
-		t.Fatalf("expected %q to be %q", contents, expected)
-	}
-}
-
-func TestExecute_regexReplaceAll(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`{{"random:name:532" | regexReplaceAll ":(name):" "($1)"}}`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	contents, err := template.Execute(&TemplateContext{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := []byte("random(name)532")
-	if !bytes.Equal(contents, expected) {
-		t.Fatalf("expected %q to be %q", contents, expected)
-	}
-}
-
-func TestExecute_toLower(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`{{"BACON" | toLower}}`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	contents, err := template.Execute(&TemplateContext{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := []byte("bacon")
-	if !bytes.Equal(contents, expected) {
-		t.Fatalf("expected %q to be %q", contents, expected)
-	}
-}
-
-func TestExecute_toTitle(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`{{"eat more bacon" | toTitle}}`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	contents, err := template.Execute(&TemplateContext{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := []byte("Eat More Bacon")
-	if !bytes.Equal(contents, expected) {
-		t.Fatalf("expected %q to be %q", contents, expected)
-	}
-}
-
-func TestExecute_toUpper(t *testing.T) {
-	inTemplate := test.CreateTempfile([]byte(`{{"bacon" | toUpper}}`), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	template, err := NewTemplate(inTemplate.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	contents, err := template.Execute(&TemplateContext{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := []byte("BACON")
-	if !bytes.Equal(contents, expected) {
-		t.Fatalf("expected %q to be %q", contents, expected)
+	result = bytes.TrimSpace(result)
+	if !bytes.Equal(result, expected) {
+		t.Errorf("expected \n%q\n to be \n%q\n", result, expected)
 	}
 }

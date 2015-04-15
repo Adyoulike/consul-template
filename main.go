@@ -1,4 +1,4 @@
-package main
+package main // import "github.com/hashicorp/consul-template"
 
 import (
 	"os"
@@ -8,9 +8,9 @@ import (
 const Name = "consul-template"
 
 // Version is the current version of this application.
-const Version = "0.4.0"
+const Version = "0.8.1.dev"
 
 func main() {
-	cli := &CLI{outStream: os.Stdout, errStream: os.Stderr}
+	cli := NewCLI(os.Stdout, os.Stderr)
 	os.Exit(cli.Run(os.Args))
 }
